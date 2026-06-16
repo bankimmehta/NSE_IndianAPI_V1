@@ -23,7 +23,7 @@ import parse
 import analysis
 
 st.set_page_config(page_title="NIFTY 50 Fundamentals", layout="wide")
-st.title("📊 NIFTY 50 Fundamentals — indianapi.in")
+st.title("📊 NIFTY 50 Fundamentals")
 st.caption("All figures in ₹ crore · annual statements · read-only (no API calls)")
 
 
