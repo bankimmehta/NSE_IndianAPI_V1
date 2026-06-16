@@ -124,6 +124,16 @@ def main():
         log.error("No usable data. Check the log above for the API responses.")
         sys.exit(1)
 
+    # detect name collisions: same company returned for >1 ticker
+    by_company = {}
+    for tk, _, raw, _ in parsed:
+        by_company.setdefault(raw.get("companyName"), []).append(tk)
+    dups = {c: tks for c, tks in by_company.items() if c and len(tks) > 1}
+    if dups:
+        for c, tks in dups.items():
+            log.warning("DUPLICATE: '%s' returned for tickers %s — check those "
+                        "names in config.NIFTY_50 (they didn't resolve).", c, tks)
+
     # ---- assemble tables ----
     overview = pd.DataFrame([parse.snapshot(raw, tk) for tk, _, raw, _ in parsed])
     stmt_tables = {}

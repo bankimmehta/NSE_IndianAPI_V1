@@ -2,53 +2,139 @@
 """
 app.py — Streamlit viewer for the indianapi.in NIFTY 50 dataset.
 
-Reads what extract.py produced (output/nifty50_data.json + the Excel). It does
-NOT call the API, so browsing never spends your quota.
+Robust data loading (works locally AND on Streamlit Cloud / GitHub):
+  1. searches several likely paths for nifty50_data.json
+  2. else reads all cache/*.json
+  3. else lets you UPLOAD json file(s) right in the browser
+Handles both the combined {ticker: bundle} dataset and single-stock bundles,
+and de-duplicates name collisions (same company returned for >1 ticker).
 
 Run:  streamlit run app.py
 """
 
 import json
+from pathlib import Path
+
 import streamlit as st
+import pandas as pd
+
+import config
+import parse
+import analysis
 
 st.set_page_config(page_title="NIFTY 50 Fundamentals", layout="wide")
 st.title("📊 NIFTY 50 Fundamentals — indianapi.in")
 st.caption("All figures in ₹ crore · annual statements · read-only (no API calls)")
 
-import pandas as pd
-import config
-import parse
-import analysis
 
-DATA = config.OUTPUT_DIR / "nifty50_data.json"
-XLSX = config.OUTPUT_DIR / "nifty50_fundamentals.xlsx"
+# ---------------------------------------------------------------------------
+# robust dataset loading
+# ---------------------------------------------------------------------------
+def _wrap(data: dict) -> dict:
+    """Normalize loaded JSON into {ticker: bundle}, accepting either form."""
+    if isinstance(data, dict) and "financials" in data and "companyName" in data:
+        # a SINGLE-stock bundle (e.g. response.json)
+        cp = data.get("companyProfile") or {}
+        tk = cp.get("exchangeCodeNse") or data.get("companyName") or "STOCK"
+        return {tk: data}
+    if isinstance(data, dict):
+        # combined {ticker: bundle} — keep only entries that look like bundles
+        return {k: v for k, v in data.items()
+                if isinstance(v, dict) and v.get("financials")}
+    return {}
 
-if not DATA.exists():
-    st.warning("No data yet. Run **`python extract.py`** first (it fetches the 50 "
-               "stocks and writes the dataset this app reads).")
-    st.stop()
 
-with open(DATA, encoding="utf-8") as f:
-    raw_all = json.load(f)
+def _candidate_paths():
+    names = [config.OUTPUT_DIR / "nifty50_data.json",
+             config.ROOT / "nifty50_data.json",
+             Path.cwd() / "output" / "nifty50_data.json",
+             Path.cwd() / "nifty50_data.json"]
+    return names
+
+
+def load_dataset():
+    # 1) combined json on disk
+    for p in _candidate_paths():
+        if p.exists():
+            try:
+                return _wrap(json.load(open(p, encoding="utf-8"))), f"file: {p}"
+            except Exception:  # noqa: BLE001
+                pass
+    # 2) rebuild from cache/*.json
+    cache_files = sorted(config.CACHE_DIR.glob("*.json")) if config.CACHE_DIR.exists() else []
+    if cache_files:
+        out = {}
+        for cf in cache_files:
+            try:
+                out.update(_wrap(json.load(open(cf, encoding="utf-8"))))
+            except Exception:  # noqa: BLE001
+                continue
+        if out:
+            return out, f"cache/ ({len(out)} stocks)"
+    return None, None
+
+
+def dedupe(raw_all: dict):
+    """Keep first ticker per company; report collisions."""
+    seen, kept, collisions = {}, {}, {}
+    for tk, raw in raw_all.items():
+        name = raw.get("companyName") or tk
+        if name in seen:
+            collisions.setdefault(name, [seen[name]]).append(tk)
+        else:
+            seen[name] = tk
+            kept[tk] = raw
+    return kept, collisions
+
+
+raw_all, source = load_dataset()
+
+# Upload fallback (works on Streamlit Cloud where files aren't on disk)
+if not raw_all:
+    st.warning("No dataset found on disk. Upload your **nifty50_data.json** "
+               "(or one/more per-stock JSON files) to view them here.")
+    ups = st.file_uploader("Upload JSON", type="json", accept_multiple_files=True)
+    if ups:
+        raw_all = {}
+        for u in ups:
+            try:
+                raw_all.update(_wrap(json.load(u)))
+            except Exception as e:  # noqa: BLE001
+                st.error(f"{u.name}: {e}")
+        source = f"upload ({len(raw_all)} stocks)"
+    if not raw_all:
+        st.info("Tip: commit `output/nifty50_data.json` to your repo so the app "
+                "finds it automatically, or upload it above.")
+        st.stop()
+
+raw_all, collisions = dedupe(raw_all)
+st.caption(f"Loaded {len(raw_all)} stocks · {source}")
+if collisions:
+    msg = "; ".join(f"**{name}** ← {', '.join(tks)}" for name, tks in collisions.items())
+    st.warning("⚠️ Duplicate companies detected — these tickers returned the same "
+               f"company (likely a name in `config.NIFTY_50` that didn't resolve): {msg}. "
+               "Kept one of each. Fix those names and re-run extract.")
+
+
+# ---------------------------------------------------------------------------
+@st.cache_data
+def overview_df(keys):
+    return pd.DataFrame([parse.snapshot(raw_all[k], k) for k in keys])
 
 
 @st.cache_data
-def overview_df():
-    return pd.DataFrame([parse.snapshot(raw, tk) for tk, raw in raw_all.items()])
+def analysis_df(keys):
+    return pd.DataFrame([analysis.summary_row(raw_all[k], k) for k in keys])
 
 
-@st.cache_data
-def analysis_df():
-    return pd.DataFrame([analysis.summary_row(raw, tk) for tk, raw in raw_all.items()])
-
-
-ov = overview_df()
-an = analysis_df()
+keys = list(raw_all.keys())
+ov = overview_df(keys)
+an = analysis_df(keys)
 
 tab_overview, tab_screen, tab_detail = st.tabs(
     ["🏆 Overview", "🔬 Screener", "🔍 Stock detail"])
 
-# ---------------------------------------------------------------------------
+# ---- Overview ----
 with tab_overview:
     st.subheader(f"{len(ov)} stocks")
     cols = ["ticker", "company", "industry", "price_nse", "pct_change",
@@ -59,21 +145,20 @@ with tab_overview:
     fmt = {"price_nse": "{:.2f}", "pct_change": "{:+.2f}%", "market_cap_cr": "{:,.0f}",
            "pe_ttm": "{:.1f}", "pb": "{:.2f}", "roe_pct": "{:.1f}%", "roic_pct": "{:.1f}%",
            "net_margin_pct": "{:.1f}%", "debt_to_equity": "{:.2f}",
-           "rev_growth_pct": "{:+.1f}%", "rev_5y_cagr_pct": "{:.1f}%",
-           "div_yield_pct": "{:.2f}%"}
-    styled = view.style.format({k: v for k, v in fmt.items() if k in view.columns}, na_rep="—")
-    st.dataframe(styled, use_container_width=True, height=620)
-
-    if XLSX.exists():
-        with open(XLSX, "rb") as f:
+           "rev_growth_pct": "{:+.1f}%", "rev_5y_cagr_pct": "{:.1f}%", "div_yield_pct": "{:.2f}%"}
+    st.dataframe(view.style.format({k: v for k, v in fmt.items() if k in view.columns}, na_rep="—"),
+                 use_container_width=True, height=560)
+    xlsx = config.OUTPUT_DIR / "nifty50_fundamentals.xlsx"
+    if xlsx.exists():
+        with open(xlsx, "rb") as f:
             st.download_button("⬇️ Download full Excel workbook", f.read(),
                                "nifty50_fundamentals.xlsx",
                                "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet")
 
-# ---------------------------------------------------------------------------
+# ---- Screener ----
 with tab_screen:
     st.subheader("Shortlist on your own rules")
-    st.caption("All criteria evaluated over the full multi-year history. "
+    st.caption("Every criterion is evaluated over the FULL multi-year history. "
                "Filters apply together (AND).")
     c1, c2, c3 = st.columns(3)
     with c1:
@@ -112,19 +197,19 @@ with tab_screen:
 
     hits = df[m]
     st.markdown(f"**{len(hits)} of {len(df)} stocks match.**")
-    cols = ["ticker", "company", "rev_cagr_pct", "ni_cagr_pct", "roce_avg_pct",
-            "roe_avg_pct", "de_now", "piotroski_f", "altman_zone",
-            "fcf_positive_years", "n_red_flags", "n_green_flags"]
-    st.dataframe(hits[[c for c in cols if c in hits.columns]]
+    scols = ["ticker", "company", "rev_cagr_pct", "ni_cagr_pct", "roce_avg_pct",
+             "roe_avg_pct", "de_now", "piotroski_f", "altman_zone",
+             "fcf_positive_years", "n_red_flags", "n_green_flags"]
+    st.dataframe(hits[[c for c in scols if c in hits.columns]]
                  .sort_values("roce_avg_pct", ascending=False),
-                 use_container_width=True, hide_index=True, height=460)
+                 use_container_width=True, hide_index=True, height=440)
     st.download_button("⬇️ Download shortlist (CSV)", hits.to_csv(index=False).encode(),
                        "shortlist.csv", "text/csv")
 
-# ---------------------------------------------------------------------------
+# ---- Detail ----
 with tab_detail:
-    labels = {tk: f"{tk} — {raw.get('companyName','')}" for tk, raw in raw_all.items()}
-    pick = st.selectbox("Stock", list(raw_all.keys()), format_func=lambda t: labels[t])
+    labels = {tk: f"{tk} — {raw_all[tk].get('companyName','')}" for tk in keys}
+    pick = st.selectbox("Stock", keys, format_func=lambda t: labels[t])
     raw = raw_all[pick]
     snap = parse.snapshot(raw, pick)
 
@@ -147,10 +232,8 @@ with tab_detail:
         with st.expander(name, expanded=(name == "Income")):
             show = df.copy()
             show.columns = [str(y) for y in show.columns]
-            st.dataframe(show.style.format("{:,.0f}", na_rep="—"),
-                         use_container_width=True)
+            st.dataframe(show.style.format("{:,.0f}", na_rep="—"), use_container_width=True)
 
-    # ---- multi-year analysis ----
     a = analysis.analyze(raw, pick)
     st.markdown("#### Multi-year analysis")
     fc1, fc2 = st.columns(2)
@@ -168,33 +251,10 @@ with tab_detail:
                 st.markdown(f"- **{nm}** — {note}")
         else:
             st.caption("No green flags.")
-    st.markdown("**Ratios by year** (trend read across the row)")
+    st.markdown("**Ratios by year** (read the trend across each row)")
     rt = analysis.ratio_table(raw, pick)
     rt.columns = [str(c) for c in rt.columns]
     st.dataframe(rt.style.format("{:,.1f}", na_rep="—"), use_container_width=True)
-
-    cc = st.columns(2)
-    with cc[0]:
-        st.markdown("#### Key ratios")
-        km = parse.metrics_long(raw, pick)
-        if not km.empty:
-            for cat in km["category"].unique():
-                sub = km[km["category"] == cat][["metric", "value"]]
-                with st.expander(cat):
-                    st.dataframe(sub.reset_index(drop=True), use_container_width=True,
-                                 height=min(300, 40 + 28 * len(sub)))
-    with cc[1]:
-        st.markdown("#### Shareholding (latest)")
-        sh = parse.shareholding(raw, pick)
-        if not sh.empty:
-            st.dataframe(sh[["holder", "percent", "as_of"]], use_container_width=True)
-        av = raw.get("analystView") or []
-        if av:
-            st.markdown("#### Analyst recommendations")
-            ad = pd.DataFrame([{"Rating": a.get("ratingName"),
-                                "Analysts": a.get("numberOfAnalystsLatest")}
-                               for a in av if a.get("ratingName") != "Total"])
-            st.dataframe(ad, use_container_width=True, hide_index=True)
 
     news = parse.news(raw)
     if news:
