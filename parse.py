@@ -58,7 +58,7 @@ def statements(raw) -> tuple[dict, list]:
         items, disp = {}, {}
         for p in periods:
             fy = int(p["FiscalYear"])
-            for it in p["stockFinancialMap"].get(grp, []):
+            for it in (p.get("stockFinancialMap") or {}).get(grp) or []:
                 k = it.get("key")
                 if not k or k in _SKIP:
                     continue
@@ -78,7 +78,7 @@ def _revenue_series(raw):
     periods = _annual_periods(raw)
     out = {}
     for p in periods:
-        for it in p["stockFinancialMap"].get("INC", []):
+        for it in (p.get("stockFinancialMap") or {}).get("INC") or []:
             if it.get("key") == "TotalRevenue":
                 out[int(p["FiscalYear"])] = _num(it.get("value"))
     return out
@@ -88,7 +88,7 @@ def _income_item(raw, key):
     periods = _annual_periods(raw)
     if not periods:
         return None
-    for it in periods[-1]["stockFinancialMap"].get("INC", []):
+    for it in (periods[-1].get("stockFinancialMap") or {}).get("INC") or []:
         if it.get("key") == key:
             return _num(it.get("value"))
     return None

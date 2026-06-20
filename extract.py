@@ -99,7 +99,13 @@ def main():
             continue
 
         raw_all[tk] = raw
-        stmts, _ = parse.statements(raw)
+        try:
+            stmts, _ = parse.statements(raw)
+        except Exception as e:  # noqa: BLE001  (malformed bundle — skip, don't crash)
+            log.warning("%-12s parse failed: %s — skipping this stock", tk, e)
+            summary.append((tk, name, "PARSE-ERROR", str(e)[:60]))
+            del raw_all[tk]
+            continue
         parsed.append((tk, raw.get("companyName") or name, raw, stmts))
         summary.append((tk, name, "OK" + (" (api)" if spent else " (cache)"),
                         raw.get("companyName")))
@@ -124,63 +130,63 @@ def main():
         log.error("No usable data. Check the log above for the API responses.")
         sys.exit(1)
 
-    # detect name collisions: same company returned for >1 ticker
-    by_company = {}
-    for tk, _, raw, _ in parsed:
-        by_company.setdefault(raw.get("companyName"), []).append(tk)
-    dups = {c: tks for c, tks in by_company.items() if c and len(tks) > 1}
-    if dups:
-        for c, tks in dups.items():
-            log.warning("DUPLICATE: '%s' returned for tickers %s — check those "
-                        "names in config.NIFTY_50 (they didn't resolve).", c, tks)
+    # ---- assemble + write (shared with build_dataset.py) ----
+    build_workbook(raw_all, log.info,
+                   note=f"{len(parsed)} stocks OK; empty/error: "
+                        f"{', '.join(bad) if bad else '(none)'}")
+    log.info("Full log: %s", logfile)
 
-    # ---- assemble tables ----
-    overview = pd.DataFrame([parse.snapshot(raw, tk) for tk, _, raw, _ in parsed])
+
+def build_workbook(raw_all, logfn=print, note=""):
+    """Assemble the Excel workbook + combined JSON from {ticker: raw_bundle}.
+
+    Used by extract.py (after fetching) AND by build_dataset.py (from cache only,
+    no API key, no fetching). Runs the multi-year analysis on the cached data.
+    """
+    import analysis
+    config.OUTPUT_DIR.mkdir(parents=True, exist_ok=True)
+    items = [(tk, raw) for tk, raw in raw_all.items()
+             if isinstance(raw, dict) and raw.get("financials")]
+    if not items:
+        logfn("Nothing to write (no valid stock bundles).")
+        return None
+
+    overview = pd.DataFrame([parse.snapshot(raw, tk) for tk, raw in items])
     stmt_tables = {}
     for tab in STMT_TABS:
         frames = []
-        for tk, comp, _, stmts in parsed:
+        for tk, raw in items:
+            stmts, _ = parse.statements(raw)
             df = stmts.get(tab)
             if df is None or df.empty:
                 continue
             d = df.reset_index()
             d.insert(0, "Ticker", tk)
-            d.insert(1, "Company", comp)
+            d.insert(1, "Company", raw.get("companyName") or tk)
             frames.append(d)
         stmt_tables[tab] = pd.concat(frames, ignore_index=True) if frames else pd.DataFrame()
-    metrics = pd.concat([parse.metrics_long(raw, tk) for tk, _, raw, _ in parsed], ignore_index=True)
-    holding = pd.concat([parse.shareholding(raw, tk) for tk, _, raw, _ in parsed], ignore_index=True)
-
-    # multi-year analysis (runs on cached data; no API calls)
-    import analysis
-    analysis_df = pd.DataFrame([analysis.summary_row(raw, tk) for tk, _, raw, _ in parsed])
+    metrics = pd.concat([parse.metrics_long(raw, tk) for tk, raw in items], ignore_index=True)
+    holding = pd.concat([parse.shareholding(raw, tk) for tk, raw in items], ignore_index=True)
+    analysis_df = pd.DataFrame([analysis.summary_row(raw, tk) for tk, raw in items])
     flag_rows = []
-    for tk, _, raw, _ in parsed:
+    for tk, raw in items:
         flag_rows.extend(analysis.flags_long(raw, tk))
     flags_df = pd.DataFrame(flag_rows) if flag_rows else pd.DataFrame(
         columns=["ticker", "type", "flag", "note"])
-    n_invest = int(analysis_df["investigate"].sum()) if not analysis_df.empty else 0
-    log.info("Analysis: %d/%d stocks flagged 'investigate' (>=%d yrs, no severe red flags)",
-             n_invest, len(analysis_df), analysis.MIN_YEARS)
 
     meta = {
         "source": "indianapi.in (stock endpoint)",
         "generated": datetime.datetime.now().strftime("%Y-%m-%d %H:%M"),
-        "stocks_ok": len(parsed),
-        "stocks_empty_or_error": len(bad),
-        "empty_or_error_tickers": ", ".join(bad) if bad else "(none)",
-        "log_file": logfile.name,
-        "note": "All money values in Rs crore. Statement years are columns.",
+        "stocks": len(items),
+        "note": "All money values in Rs crore. Statement years are columns. " + note,
     }
-
     xlsx = config.OUTPUT_DIR / "nifty50_fundamentals.xlsx"
     _write_excel(xlsx, overview, stmt_tables, metrics, holding, analysis_df, flags_df, meta)
     with open(config.OUTPUT_DIR / "nifty50_data.json", "w", encoding="utf-8") as f:
-        json.dump(raw_all, f)
-
-    log.info("Wrote %s", xlsx)
-    log.info("Wrote %s (for the app)", config.OUTPUT_DIR / "nifty50_data.json")
-    log.info("Full log: %s", logfile)
+        json.dump({tk: raw for tk, raw in items}, f)
+    logfn(f"Wrote {xlsx}")
+    logfn(f"Wrote {config.OUTPUT_DIR / 'nifty50_data.json'} (for the app)")
+    return xlsx
 
 
 if __name__ == "__main__":

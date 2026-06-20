@@ -43,7 +43,7 @@ def _series(raw, group, key):
     """{year: value} for one line item across all annual periods."""
     out = {}
     for p in _annual(raw):
-        for it in p["stockFinancialMap"].get(group, []):
+        for it in (p.get("stockFinancialMap") or {}).get(group) or []:
             if it.get("key") == key:
                 out[int(p["FiscalYear"])] = _num(it.get("value"))
     return out
