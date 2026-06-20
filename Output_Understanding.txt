@@ -1,0 +1,31 @@
+
+
+ROCE ≥15%, D/E ≤1.5, interest cover ≥3×, CAGR ≥10% ==> Defaults for screener tab
+
+Pitroski and Altman zone are two well-established forensic scores, both computed from the full multi-year statements in analysis.py. They're diagnostic checks, not opinions. Here's what each means and how it acts in the screener.
+
+A couple of honest caveats. Both were designed and calibrated primarily on non-financial companies, so for banks/NBFCs they don't apply cleanly — that's why analysis.py skips Altman for financials and you have the "Include financials" toggle. And neither is predictive on its own; they're triage tools to rank where to spend your reading time, best used together with the trend and consistency columns rather than as a verdict.
+
+
+Piotroski F-Score (0–9)
+A financial-health score from accounting professor Joseph Piotroski. It asks nine yes/no questions about a company comparing the latest year to the prior year, and adds 1 point for each "yes." The nine cover three areas:
+
+Profitability — positive net income, positive operating cash flow, improving return on assets, and (importantly) operating cash flow exceeding net income (i.e. profits are backed by real cash, not accruals).
+Leverage/liquidity — falling debt, improving current ratio, no major share dilution.
+Efficiency — improving gross margin and improving asset turnover.
+
+So 9 = firing on all cylinders, 0 = weak across the board. Conventionally 7–9 is strong, 4–6 middling, 0–3 weak. It's most useful for separating genuinely improving businesses from deteriorating ones. One caveat: it's a year-over-year comparison, so a single rough year can dent it even for a good long-term compounder — which is why you read it alongside the multi-year trends, not alone.
+Altman Z-Score → "zone"
+Edward Altman's bankruptcy-distress predictor. It combines five ratios (working capital, retained earnings, EBIT, equity-vs-liabilities, and sales — all relative to total assets) into one number, then buckets it into a zone:
+
+safe — financially sound, low distress risk
+grey — borderline, watch it
+distress — elevated risk of financial trouble
+
+I used the book-value variant (Z′) so it works from statements alone without needing market cap. It's a screen for balance-sheet fragility — a "distress" reading is a flag to investigate why, not an automatic prediction of failure.
+How they affect the screener
+
+Piotroski is a slider: "Min Piotroski F" (default 5). A stock is kept only if its F-score is ≥ your threshold. Raise it to 7–8 to demand high-quality, improving fundamentals; lower it to be more inclusive.
+Altman zone is not a direct filter control — there's no slider for it. It shows in the results table as context, and it feeds the screener indirectly: a "distress" zone generates a red flag, so it's caught by the "No red flags" checkbox and by the "investigate = True" gate (which requires no severe red flags). So if you tick "No red flags," distress-zone names get filtered out.
+
+

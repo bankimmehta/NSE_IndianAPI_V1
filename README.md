@@ -82,3 +82,25 @@ In the **app**: a **Screener** tab lets you filter on your own rules (min
 revenue CAGR, min avg ROCE, max D/E, min Piotroski, FCF-every-year, no red
 flags, investigate-only) and download the shortlist; the **Stock detail** tab
 shows each name's red/green flags and a by-year ratio table.
+
+## Buy-readiness — three independent lenses (factual, never merged)
+`analysis.py` now evaluates each stock through THREE separate lenses and reports
+each on its own — they are deliberately NOT combined into a single buy score
+(quality, price, and timing answer different questions):
+
+- **Fundamentals (/6)** — multi-year quality (avg ROCE/ROE), consistent
+  profitability, revenue CAGR, FCF reliability, leverage, Altman (non-financials).
+- **Valuation (/5)** — P/E vs **sector**, P/E vs **peer median**, position in the
+  stock's **own 12-month P/E band**, PEG ≤ 2, P/B vs peers. All from the API.
+- **Technicals (/4)** — price vs 50-day & 300-day MA, moving-average stack
+  alignment, and position in the 52-week range. From the API's price/MA data.
+
+Each lens has a pass/fail checklist with the actual numbers shown. A stock is
+"all three positive" only when it independently clears fundamentals AND valuation
+AND technicals. Example: a great business that is expensive and falling shows
+Fundamentals 5/6 but Valuation 1/5 and Technicals 0/4 → not a buy right now.
+
+In the **Screener**: four independent toggles (Fundamentals strong / Valuation
+not stretched / Technicals in uptrend / All three positive). In **Stock detail**:
+all three checklists side by side. None of this is advice — it surfaces facts so
+you decide.

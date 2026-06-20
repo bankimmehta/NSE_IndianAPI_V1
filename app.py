@@ -23,7 +23,7 @@ import parse
 import analysis
 
 st.set_page_config(page_title="NIFTY 50 Fundamentals", layout="wide")
-st.title("📊 NIFTY 50 Fundamentals")
+st.title("📊 NIFTY 50 Fundamentals — indianapi.in")
 st.caption("All figures in ₹ crore · annual statements · read-only (no API calls)")
 
 
@@ -170,8 +170,18 @@ with tab_screen:
     with c3:
         need_fcf = st.checkbox("FCF positive every year", value=False)
         no_red = st.checkbox("No red flags", value=False)
-        only_invest = st.checkbox("Only 'investigate' = True", value=True)
         incl_fin = st.checkbox("Include financials", value=True)
+
+    st.markdown("**Three independent lenses** (each evaluated separately — never combined into one score):")
+    L1, L2, L3, L4 = st.columns(4)
+    gate_fund = L1.checkbox("✅ Fundamentals strong", value=True,
+                            help="≥4/6 fundamental checks AND no severe red flags")
+    gate_value = L2.checkbox("💰 Valuation not stretched", value=False,
+                             help="≥3/5 valuation checks (vs sector / peers / own P/E band / PEG)")
+    gate_tech = L3.checkbox("📈 Technicals in uptrend", value=False,
+                            help="≥3/4 technical checks (above 50 & 300 DMA, MA stack, healthy 52w zone)")
+    gate_all = L4.checkbox("🎯 All three positive", value=False,
+                           help="Passes fundamentals AND valuation AND technicals, independently")
 
     df = an.copy()
 
@@ -190,19 +200,28 @@ with tab_screen:
         m &= df["fcf_positive_years"].apply(fcf_all)
     if no_red:
         m &= df["n_red_flags"] == 0
-    if only_invest:
-        m &= df["investigate"]
     if not incl_fin:
         m &= ~df["is_financial"]
+    if gate_fund:
+        m &= df["fund_ok"]
+    if gate_value:
+        m &= df["value_ok"]
+    if gate_tech:
+        m &= df["tech_ok"]
+    if gate_all:
+        m &= df["all_three_lenses"]
 
     hits = df[m]
-    st.markdown(f"**{len(hits)} of {len(df)} stocks match.**")
-    scols = ["ticker", "company", "rev_cagr_pct", "ni_cagr_pct", "roce_avg_pct",
-             "roe_avg_pct", "de_now", "piotroski_f", "altman_zone",
-             "fcf_positive_years", "n_red_flags", "n_green_flags"]
+    st.markdown(f"**{len(hits)} of {len(df)} stocks match.**  Each lens shown separately — "
+                "you decide how to weigh them.")
+    scols = ["ticker", "company", "fund_checks", "value_checks", "tech_checks",
+             "all_three_lenses", "roce_avg_pct", "rev_cagr_pct", "pe_ttm",
+             "pe_sector", "peg", "pos_52w", "altman_zone"]
     st.dataframe(hits[[c for c in scols if c in hits.columns]]
-                 .sort_values("roce_avg_pct", ascending=False),
+                 .sort_values(["all_three_lenses", "roce_avg_pct"], ascending=False),
                  use_container_width=True, hide_index=True, height=440)
+    st.caption("Lenses: fund_checks = fundamentals /6 · value_checks = valuation /5 · "
+               "tech_checks = technicals /4. These are factual checks, not advice.")
     st.download_button("⬇️ Download shortlist (CSV)", hits.to_csv(index=False).encode(),
                        "shortlist.csv", "text/csv")
 
@@ -235,6 +254,32 @@ with tab_detail:
             st.dataframe(show.style.format("{:,.0f}", na_rep="—"), use_container_width=True)
 
     a = analysis.analyze(raw, pick)
+    st.markdown("#### Buy-readiness — three independent lenses")
+    st.caption("Each lens is judged on its own. They are deliberately NOT combined "
+               "into a single buy score. Factual checks, not advice.")
+    s = a["summary"]
+    g1, g2, g3 = st.columns(3)
+    g1.metric("✅ Fundamentals", s["fund_checks"], "strong" if s["fund_ok"] else "not yet")
+    g2.metric("💰 Valuation", s["value_checks"], "ok" if s["value_ok"] else "stretched")
+    g3.metric("📈 Technicals", s["tech_checks"], "uptrend" if s["tech_ok"] else "no")
+
+    lc1, lc2, lc3 = st.columns(3)
+    with lc1:
+        st.markdown("**Fundamentals**")
+        for nm, ok, d in a["fundamental_checks"]:
+            st.markdown(f"{'🟢' if ok else '⚪'} {nm} — _{d}_")
+    with lc2:
+        st.markdown("**Valuation**")
+        for nm, ok, d in a["valuation"]["checks"]:
+            st.markdown(f"{'🟢' if ok else '⚪'} {nm} — _{d}_")
+    with lc3:
+        st.markdown("**Technicals**")
+        for nm, ok, d in a["technical"]["checks"]:
+            st.markdown(f"{'🟢' if ok else '⚪'} {nm} — _{d}_")
+    if s["all_three_lenses"]:
+        st.success("All three lenses are independently positive — worth a closer look "
+                   "for entry. (Not a recommendation; verify yourself.)")
+
     st.markdown("#### Multi-year analysis")
     fc1, fc2 = st.columns(2)
     with fc1:

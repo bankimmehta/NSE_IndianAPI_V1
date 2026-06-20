@@ -319,6 +319,16 @@ def analyze(raw, ticker):
                "Rising leverage", "Shrinking revenue")]
     investigate = (n_years >= MIN_YEARS) and (len(severe) == 0)
 
+    # three independent lenses (never summed)
+    val = valuation(raw)
+    tech = technical(raw)
+    fchecks, fpass, ftot = fundamental_checks(raw, r, fin)
+
+    fund_ok = (fpass >= 4) and investigate          # fundamentals strong
+    value_ok = val["pass"] >= 3                       # not stretched
+    tech_ok = tech["pass"] >= 3                        # price in uptrend
+    all_three = fund_ok and value_ok and tech_ok
+
     summary = {
         "ticker": ticker,
         "company": raw.get("companyName"),
@@ -348,9 +358,31 @@ def analyze(raw, ticker):
         "n_red_flags": len(red),
         "n_green_flags": len(green),
         "investigate": investigate,
+        # --- three independent lenses (each its own pass count; NOT summed) ---
+        "fund_checks": f"{fpass}/{ftot}",
+        "fund_ok": fund_ok,
+        "pe_ttm": val["pe_ttm"],
+        "pe_sector": val["pe_sector"],
+        "peer_pe": val["peer_pe"],
+        "pe_band_pos": val["pe_band_pos"],
+        "peg": val["peg"],
+        "value_checks": f"{val['pass']}/{val['total']}",
+        "value_ok": value_ok,
+        "price": tech["price"],
+        "above_50dma": (tech["price"] is not None and tech["ma50"] is not None
+                        and tech["price"] >= tech["ma50"]),
+        "above_300dma": (tech["price"] is not None and tech["ma300"] is not None
+                         and tech["price"] >= tech["ma300"]),
+        "ma_stack_bullish": tech["stack_bullish"],
+        "pos_52w": tech["pos_52w"],
+        "ytd_pct": tech["ytd_pct"],
+        "tech_checks": f"{tech['pass']}/{tech['total']}",
+        "tech_ok": tech_ok,
+        "all_three_lenses": all_three,
     }
     return {"summary": summary, "ratios": r, "red": red, "green": green,
-            "years": years}
+            "years": years, "valuation": val, "technical": tech,
+            "fundamental_checks": fchecks}
 
 
 def summary_row(raw, ticker):
@@ -379,3 +411,157 @@ def ratio_table(raw, ticker, keys=("gross_margin", "op_margin", "net_margin",
     df = df.reindex(columns=sorted(df.columns))
     df.index.name = "metric"
     return df
+
+
+# ===========================================================================
+# VALUATION and TECHNICAL reads — kept SEPARATE from the fundamental analysis
+# above and from each other. Three independent lenses, never merged into one
+# "buy" score. Every check is a factual pass/fail with the number shown.
+# ===========================================================================
+import statistics as _stats
+
+
+def _sd(raw):
+    return raw.get("stockDetailsReusableData") or {}
+
+
+def _km_val(raw, key):
+    for it in (raw.get("keyMetrics") or {}).get("valuation", []):
+        if it.get("key") == key:
+            return _num(it.get("value"))
+    return np.nan
+
+
+def _tech_mas(raw):
+    out = {}
+    for it in raw.get("stockTechnicalData", []):
+        d, p = it.get("days"), _num(it.get("nsePrice"))
+        if d is not None and not np.isnan(p):
+            out[int(d)] = p
+    return out
+
+
+# ---------------------------------------------------------------------------
+def valuation(raw):
+    sd = _sd(raw)
+    pe = _num(sd.get("pPerEBasicExcludingExtraordinaryItemsTTM"))
+    if np.isnan(pe):
+        pe = _km_val(raw, "pPerEBasicExcludingExtraordinaryItemsTTM")
+    pe_sector = _num(sd.get("sectorPriceToEarningsValueRatio"))
+    pe_hi = _km_val(raw, "pPerExcludingExtraordinaryItemsHighTrailing12Months")
+    pe_lo = _km_val(raw, "pPerEExcludingExtraordinaryItemsLowTrailing12Months")
+    pb = _km_val(raw, "priceToBookMostRecentQuarter")
+    if np.isnan(pb):
+        pb = _km_val(raw, "priceToBookMostRecentFiscalYear")
+    ps = _km_val(raw, "priceToSalesTrailing12Month")
+    peg = _km_val(raw, "pegRatio")
+
+    peers = (raw.get("companyProfile") or {}).get("peerCompanyList") or []
+    ppe = [_num(p.get("priceToEarningsValueRatio")) for p in peers]
+    ppe = [x for x in ppe if not np.isnan(x) and x > 0]
+    ppb = [_num(p.get("priceToBookValueRatio")) for p in peers]
+    ppb = [x for x in ppb if not np.isnan(x) and x > 0]
+    peer_pe = _stats.median(ppe) if ppe else np.nan
+    peer_pb = _stats.median(ppb) if ppb else np.nan
+
+    band_pos = ((pe - pe_lo) / (pe_hi - pe_lo)
+                if (not np.isnan(pe) and not np.isnan(pe_hi) and not np.isnan(pe_lo)
+                    and pe_hi > pe_lo) else np.nan)
+
+    # factual checks (pass = cheaper / not stretched)
+    checks = [
+        ("P/E below sector", (not np.isnan(pe) and not np.isnan(pe_sector) and pe < pe_sector),
+         f"P/E {pe:.1f} vs sector {pe_sector:.1f}" if not np.isnan(pe) and not np.isnan(pe_sector) else "n/a"),
+        ("P/E below peer median", (not np.isnan(pe) and not np.isnan(peer_pe) and pe < peer_pe),
+         f"P/E {pe:.1f} vs peers {peer_pe:.1f}" if not np.isnan(peer_pe) else "n/a"),
+        ("In lower half of own 12m P/E range",
+         (not np.isnan(band_pos) and band_pos < 0.5),
+         f"band position {band_pos:.0%} (0%=cheap end)" if not np.isnan(band_pos) else "n/a"),
+        ("PEG <= 2", (not np.isnan(peg) and 0 < peg <= 2),
+         f"PEG {peg:.2f}" if not np.isnan(peg) else "n/a"),
+        ("P/B below peer median", (not np.isnan(pb) and not np.isnan(peer_pb) and pb < peer_pb),
+         f"P/B {pb:.2f} vs peers {peer_pb:.2f}" if not np.isnan(peer_pb) else "n/a"),
+    ]
+    npass = sum(1 for _, ok, _ in checks if ok)
+    return {
+        "pe_ttm": None if np.isnan(pe) else round(pe, 1),
+        "pe_sector": None if np.isnan(pe_sector) else round(pe_sector, 1),
+        "peer_pe": None if np.isnan(peer_pe) else round(peer_pe, 1),
+        "pe_band_pos": None if np.isnan(band_pos) else round(band_pos, 2),
+        "pb": None if np.isnan(pb) else round(pb, 2),
+        "ps": None if np.isnan(ps) else round(ps, 2),
+        "peg": None if np.isnan(peg) else round(peg, 2),
+        "checks": checks,
+        "pass": npass, "total": len(checks),
+    }
+
+
+# ---------------------------------------------------------------------------
+def technical(raw):
+    mas = _tech_mas(raw)
+    price = _num((raw.get("currentPrice") or {}).get("NSE"))
+    hi, lo = _num(raw.get("yearHigh")), _num(raw.get("yearLow"))
+    ytd = _num(_sd(raw).get("priceYTDPricePercentChange"))
+    ma50, ma300 = mas.get(50, np.nan), mas.get(300, np.nan)
+    pos52 = ((price - lo) / (hi - lo)
+             if (not np.isnan(price) and not np.isnan(hi) and not np.isnan(lo) and hi > lo) else np.nan)
+
+    order = [mas.get(d) for d in (5, 10, 20, 50, 100, 300) if d in mas]
+    stack_bullish = (len(order) >= 4 and
+                     all(order[i] >= order[i + 1] for i in range(len(order) - 1)))
+
+    checks = [
+        ("Price above 50-day MA", (not np.isnan(price) and not np.isnan(ma50) and price >= ma50),
+         f"₹{price:.0f} vs 50DMA ₹{ma50:.0f}" if not np.isnan(ma50) else "n/a"),
+        ("Price above long-term (300-day) MA",
+         (not np.isnan(price) and not np.isnan(ma300) and price >= ma300),
+         f"₹{price:.0f} vs 300DMA ₹{ma300:.0f}" if not np.isnan(ma300) else "n/a"),
+        ("Moving-average stack bullish (short above long)", stack_bullish,
+         "5>10>20>50>100>300" if stack_bullish else "not aligned"),
+        ("In a healthy 52-week zone (30-95%)",
+         (not np.isnan(pos52) and 0.30 <= pos52 <= 0.95),
+         f"{pos52:.0%} of 52w range" if not np.isnan(pos52) else "n/a"),
+    ]
+    npass = sum(1 for _, ok, _ in checks if ok)
+    return {
+        "price": None if np.isnan(price) else round(price, 1),
+        "ma50": None if np.isnan(ma50) else round(ma50, 1),
+        "ma300": None if np.isnan(ma300) else round(ma300, 1),
+        "pos_52w": None if np.isnan(pos52) else round(pos52, 2),
+        "ytd_pct": None if np.isnan(ytd) else round(ytd, 1),
+        "stack_bullish": stack_bullish,
+        "checks": checks,
+        "pass": npass, "total": len(checks),
+    }
+
+
+# ---------------------------------------------------------------------------
+def fundamental_checks(raw, r, fin):
+    """Six factual fundamental pass/fail checks (separate from valuation/technical)."""
+    rev_c = cagr(r["revenue"])
+    roce_avg = avg(r["roce"])
+    roe_avg = avg(r["roe"])
+    de = latest(r["debt_equity"])
+    ic = latest(r["interest_cover"])
+    n_fcf, n = count_years(r["fcf"], lambda v: v > 0)
+    n_prof, npy = count_years(r["net_income"], lambda v: v > 0)
+    z, zone = altman_z_private(r) if not fin else (np.nan, "n/a")
+    qual = roe_avg if fin else roce_avg
+    qual_label = "avg ROE" if fin else "avg ROCE"
+
+    checks = [
+        (f"Quality: {qual_label} >= {ROCE_GOOD:.0f}%",
+         (not np.isnan(qual) and qual >= ROCE_GOOD),
+         f"{qual:.1f}%" if not np.isnan(qual) else "n/a"),
+        ("Consistently profitable", (npy > 0 and n_prof == npy), f"{n_prof}/{npy} yrs"),
+        ("Revenue CAGR >= 8%", (not np.isnan(rev_c) and rev_c >= 8), f"{rev_c:.1f}%" if not np.isnan(rev_c) else "n/a"),
+        ("FCF positive in majority of years", (n > 0 and n_fcf > n / 2), f"{n_fcf}/{n} yrs"),
+        ("Leverage in check (D/E <= 1.5)" if not fin else "Leverage (n/a for financials)",
+         (fin or (not np.isnan(de) and de <= DE_HIGH)),
+         "financial" if fin else (f"D/E {de:.2f}" if not np.isnan(de) else "n/a")),
+        ("Not in Altman distress" if not fin else "Altman (n/a for financials)",
+         (fin or zone == "safe" or zone == "grey"),
+         "financial" if fin else (f"Z'={z} ({zone})" if zone != "n/a" else "n/a")),
+    ]
+    npass = sum(1 for _, ok, _ in checks if ok)
+    return checks, npass, len(checks)
